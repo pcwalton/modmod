@@ -92,7 +92,9 @@ let play driver song =
 
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
         let render_row row : string =
-            let len = playback_freq / (tempo.te_speed * tempo.te_tempo / 60) in
+            let len =
+                tempo.te_speed * playback_freq * 5 / (tempo.te_tempo * 2)
+            in
 
             let render_note note : string =
                 let sample = song.so_samples.(note.no_instrument) in
@@ -134,20 +136,36 @@ let play driver song =
             Array.fold_left mix blank note_data 
         in
 
+        (* Advances to the next row, whatever that may be. This is determined
+         * by the effects. *)
+        let advance row =
+            let channels = Array.length row in
+            let rec check_note_and_jump i =
+                if i == channels then
+                    if row_no == 63 then
+                        play_row ~order:(order_no + i) ~row:0 ~tempo:tempo
+                    else
+                        play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
+                else
+                    match row.(i).no_effect with
+                          EF_pattern_break ->
+                            play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
+                        | EF_position_jump p ->
+                            play_row ~order:p ~row:0 ~tempo:tempo
+                        | _ ->
+                            check_note_and_jump (i + 1)
+            in
+            check_note_and_jump 0
+        in
+
         if order_no == Array.length song.so_order then () else
             let pat = song.so_patterns.(song.so_order.(order_no)) in
-            if row_no == Array.length pat then
-                play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
-            else begin
-                let row = pat.(row_no) in
-                Printf.printf "%d:%d:" order_no row_no;
-                Std.print row;
-                let pcm = render_row row in
-                (* Std.print pcm; *)
-                Ao.play driver pcm;
-                (* while true do () done; (* TODO *) *)
-                play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
-            end
+            let row = pat.(row_no) in
+            Printf.printf "%d:%d:" order_no row_no;
+            Std.print row;
+            let pcm = render_row row in
+            Ao.play driver pcm;
+            advance row
     in
     play_row ~order:0 ~row:0 ~tempo:{ te_tempo = 125; te_speed = 6 }
 in
