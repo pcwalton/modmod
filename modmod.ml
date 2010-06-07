@@ -1,11 +1,15 @@
 (* modmod *)
 
+type loop_info = {
+    li_start: int;
+    li_end: int
+}
+
 type sample_info = {
     si_name: string;            (* 22 characters long *)
     si_finetune: int;
     si_volume: int;             (* 0x00-0x40 *)
-    si_loop_start: int;
-    si_loop_end: int
+    si_loop: loop_info option;
 };;
 
 type sample = {
@@ -13,11 +17,28 @@ type sample = {
     sa_data: string
 };;
 
+type effect =
+      EF_none
+    | EF_arpeggio of (int * int)                (* 0; 1st half note add, 2nd *)
+    | EF_slide_up of int                        (* 1; upspeed *)
+    | EF_slide_down of int                      (* 2; downspeed *)
+    | EF_portamento of int                      (* 3; up/downspeed *)
+    | EF_vibrato of (int * int)                 (* 4; speed, depth *)
+    | EF_portamento_and_slide of (int * int)    (* 5; upspeed, downspeed *)
+    | EF_vibrato_and_slide of (int * int)       (* 6; upspeed, downspeed *)
+    | EF_tremolo of (int * int)                 (* 7; speed, depth *)
+    | EF_set_sample_offset of int               (* 9; offset *)
+    | EF_volume_slide of (int * int)            (* A; upspeed, downspeed *)
+    | EF_position_jump of int                   (* B; position *)
+    | EF_set_volume of int                      (* C; volume from 00-40 *)
+    | EF_pattern_break                          (* D *)
+    | EF_set_speed of int                       (* Fxx < 20; speed *)
+    | EF_set_tempo of int                       (* Fxx >= 20; tempo *)
+
 type note = {
     no_instrument: int;
     no_period: int;
-    no_effect_cmd: int;
-    no_effect_data: int
+    no_effect: effect
 };;
 
 type row = note array;;         (* 4 notes *)
@@ -38,7 +59,7 @@ type tempo = {
 
 (* Constants *)
 
-let frequency = 44100 in
+let playback_freq = 44100 in
 let finetune_freqs = Array.map (( * ) 2) [|
     (* table from mikmod/mplayer/mloader.c *)
     8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
@@ -55,11 +76,62 @@ let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
 ]) in
 
 let play driver song =
+    let mix dest src =
+        let (dest_in, src_in) = (IO.input_string dest, IO.input_string src) in
+        let out = IO.output_string() in
+        let len = (String.length src) / 2 in
+        for i = 0 to len-1 do
+            let result =
+                let n = IO.read_i16 dest_in + IO.read_i16 src_in in
+                if n < -32768 then -32768 else if n > 32767 then 32767 else n
+            in
+            IO.write_i16 out result
+        done;
+        IO.close_out out
+    in
+
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
-        let len = frequency * tempo.te_speed * tempo.te_tempo / 60 in
-        let render_note note =
-            let sample = song.so_samples.(note.no_instrument) in
-            failwith "TODO"
+        let render_row row : string =
+            let len = playback_freq / (tempo.te_speed * tempo.te_tempo / 60) in
+
+            let render_note note : string =
+                let sample = song.so_samples.(note.no_instrument) in
+                let { sa_info = info; sa_data = data } = sample in
+                let sample_len = String.length data in
+                let sample_freq =
+                    (* TODO: take period into account! *)
+                    finetune_freqs.(info.si_finetune)
+                in
+
+                let out = IO.output_string() in     (* TODO: reuse a buffer *)
+                for i = 0 to len - 1 do
+                    let raw_pos = i * sample_freq / playback_freq in
+                    let past_end = raw_pos >= sample_len in
+                    if past_end && info.si_loop == None then
+                        IO.write_i16 out 0
+                    else
+                        let pos =
+                            if not past_end then raw_pos else
+                                let loop = Option.get info.si_loop in
+                                let loop_start = loop.li_start in
+                                let loop_pos =
+                                    let loop_len = loop.li_end - loop_start in
+                                    (sample_len - raw_pos) mod loop_len
+                                in
+                                loop_pos + loop_start
+                        in
+                        let samp =
+                            let b = Char.code data.[pos] in
+                            if b < 128 then b else b - 256
+                        in
+                        IO.write_i16 out (samp lsl 8)
+                done;
+                IO.close_out out
+            in
+
+            let note_data = Array.map render_note row in
+            let blank = String.make (len * 2) '\000' in
+            Array.fold_left mix blank note_data 
         in
 
         if order_no == Array.length song.so_order then () else
@@ -70,8 +142,10 @@ let play driver song =
                 let row = pat.(row_no) in
                 Printf.printf "%d:%d:" order_no row_no;
                 Std.print row;
-                Ao.play driver (render_note row.(0));
-                while true do () done; (* TODO *)
+                let pcm = render_row row in
+                (* Std.print pcm; *)
+                Ao.play driver pcm;
+                (* while true do () done; (* TODO *) *)
                 play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
             end
     in
@@ -98,8 +172,9 @@ let load_stream(f:in_channel) : song =
                 si_name = name;
                 si_finetune = finetune;
                 si_volume = volume;
-                si_loop_start = loop_start;
-                si_loop_end = loop_end
+                si_loop =
+                    if loop_start == 0 then None else
+                        Some { li_start = loop_start; li_end = loop_end }
             } in
             (info, len)
         in
@@ -121,6 +196,30 @@ let load_stream(f:in_channel) : song =
         let load_pattern _ =
             let load_row _ =
                 let load_note _ =
+                    let parse_effect cmd data =
+                        let nibbles() = data lsr 4, data land 0xf in
+                        match cmd with
+                              0x0 when data == 0 -> EF_none
+                            | 0x0 -> EF_arpeggio(nibbles())
+                            | 0x1 -> EF_slide_up data
+                            | 0x2 -> EF_slide_down data
+                            | 0x3 -> EF_portamento data
+                            | 0x4 -> EF_vibrato(nibbles())
+                            | 0x5 -> EF_portamento_and_slide(nibbles())
+                            | 0x6 -> EF_vibrato_and_slide(nibbles())
+                            | 0x7 -> EF_tremolo(nibbles())
+                            | 0x9 -> EF_set_sample_offset data
+                            | 0xa -> EF_volume_slide(nibbles())
+                            | 0xb ->
+                                let (tens, ones) = nibbles() in
+                                EF_position_jump(tens * 10 + ones)  (* silly *)
+                            | 0xc -> EF_set_volume data
+                            | 0xd -> EF_pattern_break
+                            | 0xf when data <= 0x20 -> EF_set_speed data
+                            | 0xf -> EF_set_tempo data
+                            | _ -> EF_none      (* TODO: E-commands *)
+                    in
+
                     let a = IO.BigEndian.read_ui16 inf in
                     let b = IO.read_byte inf in
                     let instrument = ((a land 0xf000) lsr 8) lor (b lsr 4) in
@@ -130,8 +229,7 @@ let load_stream(f:in_channel) : song =
                     {
                         no_instrument = instrument;
                         no_period = period;
-                        no_effect_cmd = effect_cmd;
-                        no_effect_data = effect_data
+                        no_effect = parse_effect effect_cmd effect_data
                     }
                 in
                 Array.init 4 load_note
@@ -160,7 +258,7 @@ in
 
 let load_and_play_stream f =
     let song = load_stream f in
-    let driver = Ao.open_live ~bits:16 ~rate:frequency ~channels:2 () in
+    let driver = Ao.open_live ~bits:16 ~rate:playback_freq ~channels:2 () in
     Std.finally (fun() -> Ao.close driver) (play driver) song
 in
 
