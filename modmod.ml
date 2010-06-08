@@ -35,26 +35,36 @@ type effect =
     | EF_set_speed of int                       (* Fxx < 20; speed *)
     | EF_set_tempo of int                       (* Fxx >= 20; tempo *)
 
-type note = {
+type note_on = {
     no_instrument: int;
     no_period: int;
-    no_effect: effect
 };;
 
-type row = note array;;         (* 4 notes *)
+type note =
+      NO_none
+    | NO_note_on of note_on
+;;
 
-type pattern = row array;;      (* 64 rows *)
+type row = (note * effect) array;;  (* 4 notes *)
+
+type pattern = row array;;          (* 64 rows *)
 
 type song = {
-    so_title: string;           (* 20 characters long *)
-    so_samples: sample array;   (* 31 samples long *)
+    so_title: string;               (* 20 characters long *)
+    so_samples: sample array;       (* 31 samples long *)
     so_order: int array;
     so_patterns: pattern array
 };;
 
 type tempo = {
-    te_tempo: int;              (* tempo in BPM (default 125) *)
-    te_speed: int;              (* rows per beat (default 6) *)
+    te_tempo: int;                  (* tempo in BPM (default 125) *)
+    te_speed: int;                  (* rows per beat (default 6) *)
+};;
+
+type note_render_state = {
+    nrs_sample: int;
+    nrs_freq: int;
+    nrs_pos: mutable int
 };;
 
 (* Constants *)
@@ -65,6 +75,7 @@ let finetune_freqs = Array.map (( * ) 2) [|
     8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
     7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
 |] in
+let c1_period = 856 in
 
 let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
     ("M.K.", ());
@@ -75,35 +86,63 @@ let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
     ("FLT8", ())
 ]) in
 
-let play driver song =
-    let mix dest src =
-        let (dest_in, src_in) = (IO.input_string dest, IO.input_string src) in
-        let out = IO.output_string() in
-        let len = (String.length src) / 2 in
-        for i = 0 to len-1 do
-            let result =
-                let n = IO.read_i16 dest_in + IO.read_i16 src_in in
-                if n < -32768 then -32768 else if n > 32767 then 32767 else n
-            in
-            IO.write_i16 out result
-        done;
-        IO.close_out out
-    in
+let get_s16 buf idx =
+    let value = Char.code buf.[idx] lor ((Char.code buf.[idx + 1]) lsl 8) in
+    if value > 32767 then value - 65536 else value
+in
+let set_s16 buf idx value =
+    let value = if value < 0 then 65536 + value else value in
+    buf.[idx] <- Char.int (value land 0xff);
+    buf.[idx + 1] <- Char.int (value lsr 8);
+in
 
+(** [mix dest src] mixes the 16-bit little-endian audio buffer [src] into
+    [dest]. *)
+let mix dest src =
+    if String.length src != String.length dest then
+        invalid_arg "buffers must have the same length";
+
+    let rec loop i =
+        if i < String.length dest then
+            let n = (get_s16 dest i) + (get_s16 src i) in
+            let n = if n < 32768 then -32768
+                    else if n > 32767 then 32767
+                    else n
+            in
+            set_s16 dest i n;
+            loop (i + 1)
+        else ()
+    in
+    loop 0
+in
+
+let play driver song =
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
         let render_row row : string =
             let len =
                 tempo.te_speed * playback_freq * 5 / (tempo.te_tempo * 2)
             in
+            let dest = String.make (len * 2) '\000' in
+            let buf = String.create (len * 2) in
 
-            let render_note note : string =
-                let sample = song.so_samples.(note.no_instrument) in
-                let { sa_info = info; sa_data = data } = sample in
-                let sample_len = String.length data in
-                let sample_freq =
-                    (* TODO: take period into account! *)
-                    finetune_freqs.(info.si_finetune)
-                in
+            let play_note note prev_render_state =
+                match note with
+                      NO_none -> prev_render_state
+                    | NO_note { no_instrument = instr; no_period = period } =
+                        let sample = song.so_samples.(instr) in
+                        let info = sample.sa_info in
+                        let c1_freq = finetune_freqs.(info.si_finetune) in
+                        let freq = note.no_period * c1_freq / c1_period in
+                        { nrs_sample = sample; nrs_freq = freq; nrs_pos = 0 }
+            in
+
+            let render_note (state:note_render_state):note_render_state =
+                
+                        String.fill buf 0 (len * 2) '\000';
+                        let rec loop i =
+                            if i == len then () else begin
+                                
+                            end
 
                 let out = IO.output_string() in     (* TODO: reuse a buffer *)
                 for i = 0 to len - 1 do
@@ -123,10 +162,14 @@ let play driver song =
                                 loop_pos + loop_start
                         in
                         let samp =
-                            let b = Char.code data.[pos] in
-                            if b < 128 then b else b - 256
+                            let samp_8 =
+                                let b = Char.code data.[pos] in
+                                if b < 128 then b else b - 256
+                            in
+                            let samp_16 = samp_8 lsl 8 in
+                            samp_16 * info.si_volume / 0x40
                         in
-                        IO.write_i16 out (samp lsl 8)
+                        IO.write_i16 out samp
                 done;
                 IO.close_out out
             in
