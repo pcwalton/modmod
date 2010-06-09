@@ -61,10 +61,10 @@ type tempo = {
     te_speed: int;                  (* rows per beat (default 6) *)
 };;
 
-type note_render_state = {
-    nrs_sample: int;
-    nrs_freq: int;
-    nrs_pos: mutable int
+type channel_audio = {
+    ca_sample: int;
+    ca_freq: int;
+    mutable ca_pos: int
 };;
 
 (* Constants *)
@@ -75,7 +75,7 @@ let finetune_freqs = Array.map (( * ) 2) [|
     8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
     7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
 |] in
-let c1_period = 856 in
+let c1_period = 856/2 in
 
 let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
     ("M.K.", ());
@@ -92,8 +92,8 @@ let get_s16 buf idx =
 in
 let set_s16 buf idx value =
     let value = if value < 0 then 65536 + value else value in
-    buf.[idx] <- Char.int (value land 0xff);
-    buf.[idx + 1] <- Char.int (value lsr 8);
+    buf.[idx] <- Char.chr (value land 0xff);
+    buf.[idx + 1] <- Char.chr (value lsr 8);
 in
 
 (** [mix dest src] mixes the 16-bit little-endian audio buffer [src] into
@@ -105,82 +105,90 @@ let mix dest src =
     let rec loop i =
         if i < String.length dest then
             let n = (get_s16 dest i) + (get_s16 src i) in
-            let n = if n < 32768 then -32768
+            let n = if n < -32768 then -32768
                     else if n > 32767 then 32767
                     else n
             in
             set_s16 dest i n;
-            loop (i + 1)
+            loop (i + 2)
         else ()
     in
     loop 0
 in
 
 let play driver song =
+    let channels = Array.init 4 (fun _ -> ref None) in
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
         let render_row row : string =
-            let len =
-                tempo.te_speed * playback_freq * 5 / (tempo.te_tempo * 2)
+            (* Play each note, updating the channels. *)
+            let play_note (note, _) =
+                match note with
+                      NO_none -> None
+                    | NO_note_on { no_instrument = inst; no_period = pd } ->
+                        let info = song.so_samples.(inst).sa_info in
+                        let c1_freq = finetune_freqs.(info.si_finetune) in
+                        let freq = pd * c1_freq / c1_period in
+                        Some { ca_sample = inst; ca_freq = freq; ca_pos = 0 }
             in
+            ExtArray.Array.iter2
+                begin
+                    fun chan note ->
+                        Option.may
+                            (fun audio -> chan := Some audio)
+                            (play_note note)
+                end
+                channels row;
+
+            (* Create the buffers. TODO: reuse them. *)
+            let len = playback_freq*tempo.te_speed*5 / (2*tempo.te_tempo) in
             let dest = String.make (len * 2) '\000' in
             let buf = String.create (len * 2) in
 
-            let play_note note prev_render_state =
-                match note with
-                      NO_none -> prev_render_state
-                    | NO_note { no_instrument = instr; no_period = period } =
-                        let sample = song.so_samples.(instr) in
-                        let info = sample.sa_info in
-                        let c1_freq = finetune_freqs.(info.si_finetune) in
-                        let freq = note.no_period * c1_freq / c1_period in
-                        { nrs_sample = sample; nrs_freq = freq; nrs_pos = 0 }
-            in
-
-            let render_note (state:note_render_state):note_render_state =
-                
-                        String.fill buf 0 (len * 2) '\000';
-                        let rec loop i =
-                            if i == len then () else begin
-                                
-                            end
-
-                let out = IO.output_string() in     (* TODO: reuse a buffer *)
+            (* Render each channel. *)
+            let render_channel chan =
+                String.fill buf 0 (len * 2) '\000';
                 for i = 0 to len - 1 do
-                    let raw_pos = i * sample_freq / playback_freq in
-                    let past_end = raw_pos >= sample_len in
-                    if past_end && info.si_loop == None then
-                        IO.write_i16 out 0
-                    else
+                    Option.may begin fun audio ->
+                        let sample = song.so_samples.(audio.ca_sample) in
+                        let { sa_info = info; sa_data = data } = sample in
+                        let len = String.length data in
                         let pos =
-                            if not past_end then raw_pos else
-                                let loop = Option.get info.si_loop in
-                                let loop_start = loop.li_start in
-                                let loop_pos =
-                                    let loop_len = loop.li_end - loop_start in
-                                    (sample_len - raw_pos) mod loop_len
-                                in
-                                loop_pos + loop_start
+                            Int64.to_int
+                                (Int64.div
+                                    (Int64.mul (Int64.of_int audio.ca_pos)
+                                        (Int64.of_int audio.ca_freq))
+                                    (Int64.of_int playback_freq))
                         in
-                        let samp =
-                            let samp_8 =
-                                let b = Char.code data.[pos] in
-                                if b < 128 then b else b - 256
+                        let past_end = pos >= len in
+                        if past_end && info.si_loop == None then
+                            chan := None    (* past the end *)
+                        else begin
+                            let pos =
+                                if not past_end then pos else
+                                    let loop = Option.get info.si_loop in
+                                    let loop_len =
+                                        loop.li_end - loop.li_start
+                                    in
+                                    let loop_pos = (len - pos) mod loop_len in
+                                    loop_pos + loop.li_start
                             in
-                            let samp_16 = samp_8 lsl 8 in
-                            samp_16 * info.si_volume / 0x40
-                        in
-                        IO.write_i16 out samp
+                            let samp = Char.code data.[pos] in
+                            let samp = if samp < 128 then samp else samp-256 in
+                            let samp = samp lsl 8 in
+                            let samp = samp * info.si_volume / 0x40 in
+                            set_s16 buf (i * 2) samp;
+                            audio.ca_pos <- audio.ca_pos + 1
+                        end
+                    end !chan
                 done;
-                IO.close_out out
+                mix dest buf;
             in
-
-            let note_data = Array.map render_note row in
-            let blank = String.make (len * 2) '\000' in
-            Array.fold_left mix blank note_data 
+            Array.iter render_channel channels;
+            dest
         in
 
-        (* Advances to the next row, whatever that may be. This is determined
-         * by the effects. *)
+        (* Advances to the next row (which row it is is determined by the
+         * effects). *)
         let advance row =
             let channels = Array.length row in
             let rec check_note_and_jump i =
@@ -190,7 +198,7 @@ let play driver song =
                     else
                         play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
                 else
-                    match row.(i).no_effect with
+                    match snd row.(i) with
                           EF_pattern_break ->
                             play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
                         | EF_position_jump p ->
@@ -281,17 +289,24 @@ let load_stream(f:in_channel) : song =
                             | _ -> EF_none      (* TODO: E-commands *)
                     in
 
-                    let a = IO.BigEndian.read_ui16 inf in
+                    let a = IO.read_byte inf in
                     let b = IO.read_byte inf in
-                    let instrument = ((a land 0xf000) lsr 8) lor (b lsr 4) in
-                    let period = a land 0xffff in
-                    let effect_cmd = b land 0x0f in
-                    let effect_data = IO.read_byte inf in
-                    {
-                        no_instrument = instrument;
-                        no_period = period;
-                        no_effect = parse_effect effect_cmd effect_data
-                    }
+                    let c = IO.read_byte inf in
+                    let d = IO.read_byte inf in
+
+                    let instrument = (a land 0xf0) lor (c lsr 4) in
+                    let period = ((a land 0x0f) lsl 8) lor b in
+                    let (effect_cmd, effect_data) = ((c land 0x0f), (d)) in
+
+                    let note = 
+                        if instrument == 0 then NO_none else
+                            NO_note_on {
+                                no_instrument = instrument;
+                                no_period = period
+                            }
+                    in
+                    let effect = parse_effect effect_cmd effect_data in
+                    (note, effect)
                 in
                 Array.init 4 load_note
             in
