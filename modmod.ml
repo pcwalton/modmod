@@ -1,4 +1,8 @@
-(* modmod *)
+(*
+ * modmod, a music module player.
+ *
+ * Copyright (c) 2010 Patrick Walton
+ *)
 
 type loop_info = {
     li_start: int;
@@ -173,21 +177,14 @@ let play driver song =
                         else begin
                             let pos =
                                 if not past_end then pos else
+                                    (* Determine where we are in the loop
+                                     * section. *)
                                     let { li_start = lstart; li_len = llen } =
                                         Option.get info.si_loop
                                     in
                                     let lpos = (pos - len) mod llen in
                                     lpos + lstart
                             in
-                            if pos >= String.length data || pos < 0 then begin
-                                Std.print "aieeeee!\n";
-                                Std.print pos;
-                                Std.print audio.ca_pos;
-                                Std.print audio.ca_freq;
-                                Std.print playback_freq;
-                                Std.print (String.length data)
-                                (* Std.print sample *)
-                            end;
                             let samp = Char.code data.[pos] in
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
@@ -210,7 +207,7 @@ let play driver song =
             let rec check_note_and_jump i =
                 if i == channels then
                     if row_no == 63 then
-                        play_row ~order:(order_no + i) ~row:0 ~tempo:tempo
+                        play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
                     else
                         play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
                 else
@@ -226,9 +223,10 @@ let play driver song =
         in
 
         if order_no == Array.length song.so_order then () else
-            let pat = song.so_patterns.(song.so_order.(order_no)) in
+            let pat_no = song.so_order.(order_no) in
+            let pat = song.so_patterns.(pat_no) in
             let row = pat.(row_no) in
-            Printf.printf "%d:%d:" order_no row_no;
+            Printf.printf "%d:%d:" pat_no row_no;
             Std.print row;
             let pcm = render_row row in
             Ao.play driver pcm;
@@ -270,7 +268,7 @@ let load_stream(f:in_channel) : song =
     let order_len = IO.read_byte inf in
     ignore (IO.read_byte inf);  (* song loop byte *)
 
-    (* Read orders, then unused orders *)
+    (* Read orders, then unused orders. *)
     let order = Array.init order_len (fun _ -> IO.read_byte inf) in
     for i = order_len to 127 do ignore (IO.read_byte inf) done;
 
