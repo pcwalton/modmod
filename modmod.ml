@@ -36,7 +36,7 @@ type effect =
     | EF_set_tempo of int                       (* Fxx >= 20; tempo *)
 
 type note_on = {
-    no_instrument: int;
+    no_instrument: int option;
     no_period: int;
 };;
 
@@ -121,23 +121,31 @@ let play driver song =
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
         let render_row row : string =
             (* Play each note, updating the channels. *)
-            let play_note (note, _) =
+            let play_note chan (note, _) =
                 match note with
-                      NO_none -> None
-                    | NO_note_on { no_instrument = inst; no_period = pd } ->
-                        let info = song.so_samples.(inst).sa_info in
-                        let c1_freq = finetune_freqs.(info.si_finetune) in
-                        let freq = c1_period * c1_freq / pd in
-                        Some { ca_sample = inst; ca_freq = freq; ca_pos = 0 }
+                      NO_none -> ()
+                    | NO_note_on note_on ->
+                        let render inst =
+                            let period = note_on.no_period in
+                            let info = song.so_samples.(inst).sa_info in
+                            let c1_freq = finetune_freqs.(info.si_finetune) in
+                            let freq = c1_period * c1_freq / period in
+                            chan := Some {
+                                ca_sample = inst;
+                                ca_freq = freq;
+                                ca_pos = 0
+                            }
+                        in
+
+                        match (note_on.no_instrument, !chan) with
+                              (* change the instrument *)
+                              (Some inst, _) -> render inst
+                              (* keep the old channel instrument *)
+                            | (None, Some audio) -> render audio.ca_sample
+                              (* ignore *)
+                            | (None, None) -> ()
             in
-            ExtArray.Array.iter2
-                begin
-                    fun chan note ->
-                        Option.may
-                            (fun audio -> chan := Some audio)
-                            (play_note note)
-                end
-                channels row;
+            ExtArray.Array.iter2 play_note channels row;
 
             (* Create the buffers. TODO: reuse them. *)
             let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo) in
@@ -165,10 +173,21 @@ let play driver song =
                         else begin
                             let pos =
                                 if not past_end then pos else
-                                    let loop = Option.get info.si_loop in
-                                    let lpos = (len - pos) mod loop.li_len in
-                                    lpos + loop.li_start
+                                    let { li_start = lstart; li_len = llen } =
+                                        Option.get info.si_loop
+                                    in
+                                    let lpos = (pos - len) mod llen in
+                                    lpos + lstart
                             in
+                            if pos >= String.length data || pos < 0 then begin
+                                Std.print "aieeeee!\n";
+                                Std.print pos;
+                                Std.print audio.ca_pos;
+                                Std.print audio.ca_freq;
+                                Std.print playback_freq;
+                                Std.print (String.length data)
+                                (* Std.print sample *)
+                            end;
                             let samp = Char.code data.[pos] in
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
@@ -246,6 +265,7 @@ let load_stream(f:in_channel) : song =
         in
         Array.init 31 load_sample_info
     in
+    Std.print sample_infos;
 
     let order_len = IO.read_byte inf in
     ignore (IO.read_byte inf);  (* song loop byte *)
@@ -292,13 +312,19 @@ let load_stream(f:in_channel) : song =
                     let d = IO.read_byte inf in
 
                     let instrument = (a land 0xf0) lor (c lsr 4) in
+                    let instrument =
+                        if instrument == 0 then
+                            None
+                        else
+                            Some (instrument - 1)
+                    in
                     let period = ((a land 0x0f) lsl 8) lor b in
                     let (effect_cmd, effect_data) = ((c land 0x0f), (d)) in
 
                     let note = 
-                        if instrument == 0 then NO_none else
+                        if period == 0 then NO_none else
                             NO_note_on {
-                                no_instrument = instrument - 1;
+                                no_instrument = instrument;
                                 no_period = period
                             }
                     in
