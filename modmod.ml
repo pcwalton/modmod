@@ -2,7 +2,7 @@
 
 type loop_info = {
     li_start: int;
-    li_end: int
+    li_len: int
 }
 
 type sample_info = {
@@ -75,7 +75,7 @@ let finetune_freqs = Array.map (( * ) 2) [|
     8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
     7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
 |] in
-let c1_period = 856/2 in
+let c1_period = 856/8 in
 
 let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
     ("M.K.", ());
@@ -127,7 +127,7 @@ let play driver song =
                     | NO_note_on { no_instrument = inst; no_period = pd } ->
                         let info = song.so_samples.(inst).sa_info in
                         let c1_freq = finetune_freqs.(info.si_finetune) in
-                        let freq = pd * c1_freq / c1_period in
+                        let freq = c1_period * c1_freq / pd in
                         Some { ca_sample = inst; ca_freq = freq; ca_pos = 0 }
             in
             ExtArray.Array.iter2
@@ -140,7 +140,7 @@ let play driver song =
                 channels row;
 
             (* Create the buffers. TODO: reuse them. *)
-            let len = playback_freq*tempo.te_speed*5 / (2*tempo.te_tempo) in
+            let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo) in
             let dest = String.make (len * 2) '\000' in
             let buf = String.create (len * 2) in
 
@@ -166,16 +166,13 @@ let play driver song =
                             let pos =
                                 if not past_end then pos else
                                     let loop = Option.get info.si_loop in
-                                    let loop_len =
-                                        loop.li_end - loop.li_start
-                                    in
-                                    let loop_pos = (len - pos) mod loop_len in
-                                    loop_pos + loop.li_start
+                                    let lpos = (len - pos) mod loop.li_len in
+                                    lpos + loop.li_start
                             in
                             let samp = Char.code data.[pos] in
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
-                            let samp = samp * info.si_volume / 0x40 in
+                            let samp = samp * info.si_volume / 0x40 / 2 in
                             set_s16 buf (i * 2) samp;
                             audio.ca_pos <- audio.ca_pos + 1
                         end
@@ -236,14 +233,14 @@ let load_stream(f:in_channel) : song =
             let finetune = (IO.read_byte inf) land 0x0f in
             let volume = IO.read_byte inf in
             let loop_start = read_word_and_double() in
-            let loop_end = read_word_and_double() in
+            let loop_len = read_word_and_double() in
             let info = {
                 si_name = name;
                 si_finetune = finetune;
                 si_volume = volume;
                 si_loop =
                     if loop_start == 0 then None else
-                        Some { li_start = loop_start; li_end = loop_end }
+                        Some { li_start = loop_start; li_len = loop_len }
             } in
             (info, len)
         in
@@ -301,7 +298,7 @@ let load_stream(f:in_channel) : song =
                     let note = 
                         if instrument == 0 then NO_none else
                             NO_note_on {
-                                no_instrument = instrument;
+                                no_instrument = instrument - 1;
                                 no_period = period
                             }
                     in
