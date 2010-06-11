@@ -68,6 +68,7 @@ type tempo = {
 type channel_audio = {
     ca_sample: int;
     ca_freq: int;
+    mutable ca_vol: int;
     mutable ca_pos: int
 };;
 
@@ -137,6 +138,7 @@ let play driver song =
                             chan := Some {
                                 ca_sample = inst;
                                 ca_freq = freq;
+                                ca_vol = info.si_volume;
                                 ca_pos = 0
                             }
                         in
@@ -155,6 +157,15 @@ let play driver song =
             let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo) in
             let dest = String.make (len * 2) '\000' in
             let buf = String.create (len * 2) in
+
+            (* Handle preprocessing effects. *)
+            let render_preprocessing_effect chan (_, effect) =
+                match effect with
+                      EF_set_volume vol ->
+                        Option.may (fun audio -> audio.ca_vol <- vol) !chan
+                    | _ -> ()
+            in
+            ExtArray.Array.iter2 render_preprocessing_effect channels row;
 
             (* Render each channel. *)
             let render_channel chan =
@@ -188,7 +199,7 @@ let play driver song =
                             let samp = Char.code data.[pos] in
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
-                            let samp = samp * info.si_volume / 0x40 / 2 in
+                            let samp = samp * audio.ca_vol / 0x40 / 2 in
                             set_s16 buf (i * 2) samp;
                             audio.ca_pos <- audio.ca_pos + 1
                         end
