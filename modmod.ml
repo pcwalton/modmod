@@ -61,8 +61,8 @@ type song = {
 };;
 
 type tempo = {
-    te_tempo: int;                  (* tempo in BPM (default 125) *)
-    te_speed: int;                  (* rows per beat (default 6) *)
+    mutable te_tempo: int;          (* tempo in BPM (default 125) *)
+    mutable te_speed: int;          (* rows per beat (default 6) *)
 };;
 
 type channel_audio = {
@@ -122,8 +122,18 @@ let mix dest src =
 in
 
 let play driver song =
+    let tempo = { te_tempo = 125; te_speed = 6 } in
     let channels = Array.init 4 (fun _ -> ref None) in
-    let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
+    let rec play_row ~order:(order_no:int) ~row:(row_no:int) =
+        let update_tempo row =
+            Array.iter begin fun (_, effect) ->
+                match effect with
+                      EF_set_speed speed -> tempo.te_speed <- speed
+                    | EF_set_tempo t -> tempo.te_tempo <- t
+                    | _ -> ()
+            end row;
+        in
+
         let render_row row : string =
             (* Play each note, updating the channels. *)
             let play_note chan (note, effect) =
@@ -218,15 +228,15 @@ let play driver song =
             let rec check_note_and_jump i =
                 if i == channels then
                     if row_no == 63 then
-                        play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
+                        play_row ~order:(order_no + 1) ~row:0
                     else
-                        play_row ~order:order_no ~row:(row_no + 1) ~tempo:tempo
+                        play_row ~order:order_no ~row:(row_no + 1)
                 else
                     match snd row.(i) with
                           EF_pattern_break ->
-                            play_row ~order:(order_no + 1) ~row:0 ~tempo:tempo
+                            play_row ~order:(order_no + 1) ~row:0
                         | EF_position_jump p ->
-                            play_row ~order:p ~row:0 ~tempo:tempo
+                            play_row ~order:p ~row:0
                         | _ ->
                             check_note_and_jump (i + 1)
             in
@@ -239,11 +249,12 @@ let play driver song =
             let row = pat.(row_no) in
             Printf.printf "%d:%d:" pat_no row_no;
             Std.print row;
+            update_tempo row;
             let pcm = render_row row in
             Ao.play driver pcm;
             advance row
     in
-    play_row ~order:0 ~row:0 ~tempo:{ te_tempo = 125; te_speed = 6 }
+    play_row ~order:0 ~row:0
 in
 
 let load_stream(f:in_channel) : song =
