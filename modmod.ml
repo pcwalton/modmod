@@ -126,30 +126,39 @@ let play driver song =
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) ~tempo:tempo =
         let render_row row : string =
             (* Play each note, updating the channels. *)
-            let play_note chan (note, _) =
-                match note with
-                      NO_none -> ()
-                    | NO_note_on note_on ->
-                        let render inst =
-                            let period = note_on.no_period in
-                            let info = song.so_samples.(inst).sa_info in
-                            let c1_freq = finetune_freqs.(info.si_finetune) in
-                            let freq = c1_period * c1_freq / period in
-                            chan := Some {
-                                ca_sample = inst;
-                                ca_freq = freq;
-                                ca_vol = info.si_volume;
-                                ca_pos = 0
-                            }
-                        in
+            let play_note chan (note, effect) =
+                begin
+                    match note with
+                          NO_none -> ()
+                        | NO_note_on note_on ->
+                            let render inst =
+                                let period = note_on.no_period in
+                                let info = song.so_samples.(inst).sa_info in
+                                let finetune = info.si_finetune in
+                                let c1_freq = finetune_freqs.(finetune) in
+                                let freq = c1_period * c1_freq / period in
+                                chan := Some {
+                                    ca_sample = inst;
+                                    ca_freq = freq;
+                                    ca_vol = info.si_volume;
+                                    ca_pos = 0
+                                }
+                            in
 
-                        match (note_on.no_instrument, !chan) with
-                              (* change the instrument *)
-                              (Some inst, _) -> render inst
-                              (* keep the old channel instrument *)
-                            | (None, Some audio) -> render audio.ca_sample
-                              (* ignore *)
-                            | (None, None) -> ()
+                            match (note_on.no_instrument, !chan) with
+                                  (* change the instrument *)
+                                  (Some inst, _) -> render inst
+                                  (* keep the old channel instrument *)
+                                | (None, Some audio) -> render audio.ca_sample
+                                  (* ignore *)
+                                | (None, None) -> ()
+                end;
+
+                (* Handle middle-end effects. *)
+                match effect with
+                      EF_set_volume vol ->
+                        Option.may (fun audio -> audio.ca_vol <- vol) !chan
+                    | _ -> ()
             in
             ExtArray.Array.iter2 play_note channels row;
 
@@ -157,15 +166,6 @@ let play driver song =
             let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo) in
             let dest = String.make (len * 2) '\000' in
             let buf = String.create (len * 2) in
-
-            (* Handle preprocessing effects. *)
-            let render_preprocessing_effect chan (_, effect) =
-                match effect with
-                      EF_set_volume vol ->
-                        Option.may (fun audio -> audio.ca_vol <- vol) !chan
-                    | _ -> ()
-            in
-            ExtArray.Array.iter2 render_preprocessing_effect channels row;
 
             (* Render each channel. *)
             let render_channel chan =
