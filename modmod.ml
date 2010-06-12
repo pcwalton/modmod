@@ -80,7 +80,7 @@ let finetune_freqs = Array.map (( * ) 2) [|
     8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
     7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
 |] in
-let c1_period = 856/8 in
+let c1_period = 856/4 in
 
 let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
 
@@ -166,13 +166,13 @@ let play driver song =
             ExtArray.Array.iter2 play_note channels row;
 
             (* Create the buffers. TODO: reuse them. *)
-            let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo) in
-            let dest = String.make (len * 2) '\000' in
-            let buf = String.create (len * 2) in
+            let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo*2) in
+            let dest = String.make (len*4) '\000' in
+            let buf = String.create (len*4) in
 
             (* Render each channel. *)
             let render_channel chan =
-                String.fill buf 0 (len * 2) '\000';
+                String.fill buf 0 (len*4) '\000';
                 for i = 0 to len - 1 do
                     Option.may begin fun audio ->
                         let sample = song.so_samples.(audio.ca_sample) in
@@ -203,7 +203,8 @@ let play driver song =
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
                             let samp = samp * audio.ca_vol / 0x40 / 2 in
-                            set_s16 buf (i * 2) samp;
+                            set_s16 buf (i*4) samp;
+                            set_s16 buf (i*4 + 2) samp;
                             audio.ca_pos <- audio.ca_pos + 1
                         end
                     end !chan
