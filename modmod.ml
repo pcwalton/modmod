@@ -82,14 +82,7 @@ let finetune_freqs = Array.map (( * ) 2) [|
 |] in
 let c1_period = 856/8 in
 
-let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
-    ("M.K.", ());
-    ("4CHN", ());
-    ("6CHN", ());
-    ("8CHN", ());
-    ("FLT4", ());
-    ("FLT8", ())
-]) in
+let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
 
 let get_s16 buf idx =
     let value = Char.code buf.[idx] lor ((Char.code buf.[idx + 1]) lsl 8) in
@@ -257,7 +250,11 @@ let play driver song =
     play_row ~order:0 ~row:0
 in
 
-let load_stream(f:in_channel) : song =
+let load_mod(f:in_channel) : song =
+    let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
+        ("M.K.", ()); ("4CHN", ()); ("FLT4", ());
+    ]) in
+
     let inf = IO.input_channel f in
     let trim = ExtString.String.strip ~chars:"\000" in
     let title = trim(IO.nread inf 20) in
@@ -375,8 +372,9 @@ let load_stream(f:in_channel) : song =
     }
 in
 
-let load_and_play_stream f =
-    let song = load_stream f in
+let load_s3m _ = failwith "TODO" in
+
+let play_song song =
     let driver = Ao.open_live ~bits:16 ~rate:playback_freq ~channels:2 () in
     Std.finally (fun() -> Ao.close driver) (play driver) song
 in
@@ -392,9 +390,27 @@ let main() =
         List.hd paths
     in
 
+    let get_loader path =
+        let loaders = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
+            ("mod", load_mod);
+            ("s3m", load_s3m)
+        ]) in
+        try
+            let ext = ExtList.List.last (ExtString.String.nsplit path ".") in
+            let ext = String.lowercase ext in
+            try
+                Hashtbl.find loaders ext
+            with Not_found ->
+                die("don't know how to play files of type \"" ^ ext ^ "\"")
+        with ExtString.Invalid_string ->
+                die "file has no extension; can't determine its type";
+    in
+
     let path = parse_command_line() in
+    let loader = get_loader path in
     let f = open_in_bin path in
-    Std.finally (fun() -> close_in f) load_and_play_stream f
+    let song = Std.finally (fun() -> close_in f) loader f in
+    play_song song
 in
 main()
 
