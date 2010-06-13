@@ -251,13 +251,14 @@ let play driver song =
     play_row ~order:0 ~row:0
 in
 
+let trim = ExtString.String.strip ~chars:"\000" in
+
 let load_mod(f:in_channel) : song =
     let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
         ("M.K.", ()); ("4CHN", ()); ("FLT4", ());
     ]) in
 
     let inf = IO.input_channel f in
-    let trim = ExtString.String.strip ~chars:"\000" in
     let title = trim(IO.nread inf 20) in
 
     (* The sample data will be filled in later. *)
@@ -373,7 +374,45 @@ let load_mod(f:in_channel) : song =
     }
 in
 
-let load_s3m _ = failwith "TODO" in
+let load_s3m f =
+    let inf = IO.input_channel f in
+    let name = trim(IO.nread inf 28) in
+    assert (IO.read_byte inf == 0x1a);
+    assert (IO.read_byte inf == 16);
+    seek_in f 0x20;
+    let order_count = IO.read_ui16 inf in
+    let instr_count = IO.read_ui16 inf in
+    let pat_count = IO.read_ui16 inf in
+    ignore(IO.read_ui16 inf);   (* flags *)
+    ignore(IO.read_ui16 inf);   (* creator code *)
+    assert (IO.read_ui16 inf == 2);
+    assert (IO.nread inf 4 == "SCRM");
+    let global_volume = IO.read_byte inf in
+    let initial_speed = IO.read_byte inf in
+    let initial_tempo = IO.read_byte inf in
+    let (master_volume, output_channels) =
+        let b = IO.read_byte inf in (b land 0x7f, b lsr 7)
+    in
+    seek_in f 0x40;
+    let order = Array.init order_count (fun _ -> IO.read_byte inf) in
+    let read_parapointer _ = IO.read_ui16 inf * 16 in
+    let instr_offsets = Array.init instr_count read_parapointer in
+    let pat_offsets = Array.init pat_count read_parapointer in
+
+    let read_instr offset =
+        seek_in f offset;
+        failwith "TODO"
+    in
+    let instrs = Array.map read_instr instr_offsets in
+
+    let read_pat offset =
+        seek_in f offset;
+        failwith "TODO"
+    in
+    let pats = Array.map read_pat pat_offsets in
+
+    failwith "TODO"
+in
 
 let play_song song =
     let driver = Ao.open_live ~bits:16 ~rate:playback_freq ~channels:2 () in
