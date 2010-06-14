@@ -83,6 +83,8 @@ let finetune_freqs = Array.map (( * ) 2) [|
 let c1_period = 856/4 in
 
 let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
+let warn str = prerr_string "modmod: warning: "; prerr_endline str in
+let warn_unless cond str = if not cond then warn str in
 
 let get_s16 buf idx =
     let value = Char.code buf.[idx] lor ((Char.code buf.[idx + 1]) lsl 8) in
@@ -376,6 +378,8 @@ in
 
 let load_s3m f =
     let inf = IO.input_channel f in
+    let read_parapointer _ = IO.read_ui16 inf * 16 in
+
     let name = trim(IO.nread inf 28) in
     assert (IO.read_byte inf == 0x1a);
     assert (IO.read_byte inf == 16);
@@ -395,12 +399,33 @@ let load_s3m f =
     in
     seek_in f 0x40;
     let order = Array.init order_count (fun _ -> IO.read_byte inf) in
-    let read_parapointer _ = IO.read_ui16 inf * 16 in
     let instr_offsets = Array.init instr_count read_parapointer in
     let pat_offsets = Array.init pat_count read_parapointer in
 
     let read_instr offset =
         seek_in f offset;
+        let t = IO.read_byte inf in
+        let filename = IO.nread inf 12 in
+        let samp_offset =
+            let lobyte = IO.read_byte inf in
+            lobyte lor ((IO.read_ui16 inf) lsl 8)
+        in
+        let len = IO.read_i32 inf in
+        let loop_begin = IO.read_i32 inf in
+        let loop_end = IO.read_i32 inf in
+        let vol = IO.read_byte inf in   (* [0, 64) *)
+        ignore(IO.read_byte inf);
+        warn_unless (IO.read_byte inf == 0) "packed samples TODO";
+
+        let flags = IO.read_byte inf in
+        let loop = flags land 0x01 != 0 in
+        warn_unless (flags land 0x02 == 0) "stereo samples TODO";
+        warn_unless (flags land 0x04 == 0) "16-bit samples TODO";
+
+        let c2speed = IO.read_i32 inf in
+        ignore(IO.nread inf 12);
+        let name = trim(IO.nread inf 28) in
+        assert (IO.nread inf 28 == "SCRS");
         failwith "TODO"
     in
     let instrs = Array.map read_instr instr_offsets in
