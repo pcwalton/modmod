@@ -233,7 +233,7 @@ let play driver song =
                                     (Int64.of_int playback_freq))
                         in
                         let past_end = pos >= len in
-                        if past_end && info.si_loop == None then
+                        if past_end && Option.is_none info.si_loop then
                             chan := None    (* past the end *)
                         else begin
                             let pos =
@@ -324,7 +324,7 @@ let load_mod(f:in_channel) : song =
                 si_finetune = finetune;
                 si_volume = volume;
                 si_loop =
-                    if loop_start == 0 then None else
+                    if loop_len == 0 then None else
                         Some { li_start = loop_start; li_len = loop_len }
             } in
             (info, len)
