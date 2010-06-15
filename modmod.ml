@@ -31,6 +31,7 @@ type effect =
     | EF_portamento_and_slide of (int * int)    (* 5; upspeed, downspeed *)
     | EF_vibrato_and_slide of (int * int)       (* 6; upspeed, downspeed *)
     | EF_tremolo of (int * int)                 (* 7; speed, depth *)
+    | EF_pan of (int * int)                     (* 8; ??? *)
     | EF_set_sample_offset of int               (* 9; offset *)
     | EF_volume_slide of (int * int)            (* A; upspeed, downspeed *)
     | EF_position_jump of int                   (* B; position *)
@@ -82,10 +83,6 @@ let finetune_freqs = Array.map (( * ) 2) [|
 |] in
 let c1_period = 856/4 in
 
-let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
-let warn str = prerr_string "modmod: warning: "; prerr_endline str in
-let warn_unless cond str = if not cond then warn str in
-
 let get_s16 buf idx =
     let value = Char.code buf.[idx] lor ((Char.code buf.[idx + 1]) lsl 8) in
     if value > 32767 then value - 65536 else value
@@ -95,6 +92,54 @@ let set_s16 buf idx value =
     buf.[idx] <- Char.chr (value land 0xff);
     buf.[idx + 1] <- Char.chr (value lsr 8);
 in
+
+(* Logging functions *)
+let string_of_row row =
+    let string_of_note note =
+        match note with
+              NO_none -> "--- --"
+            | NO_note_on note_on ->
+                let period = Printf.sprintf "%03d" note_on.no_period in
+                let instr =
+                    match note_on.no_instrument with
+                          None -> "--"
+                        | Some instr -> Printf.sprintf "%02x" instr
+                in
+                period ^ " " ^ instr
+    in
+    let string_of_effect effect =
+        if effect = EF_none then "---" else
+        let nibbles x y = (x lsl 4) lor y in
+        let bytes =
+            match effect with
+                  EF_arpeggio(x, y) -> (0x0, nibbles x y)
+                | EF_slide_up x -> (0x1, x)
+                | EF_slide_down x -> (0x2, x)
+                | EF_portamento x -> (0x3, x)
+                | EF_vibrato(x, y) -> (0x4, nibbles x y)
+                | EF_portamento_and_slide(x, y) -> (0x5, nibbles x y)
+                | EF_vibrato_and_slide(x, y) -> (0x6, nibbles x y)
+                | EF_tremolo(x, y) -> (0x7, nibbles x y)
+                | EF_pan(x, y) -> (0x8, nibbles x y)
+                | EF_set_sample_offset x -> (0x9, x)
+                | EF_volume_slide (x, y) -> (0xa, nibbles x y)
+                | EF_position_jump x -> (0xb, x)
+                | EF_set_volume x -> (0xc, x)
+                | EF_pattern_break -> (0xd, 0x00)
+                | EF_set_speed x | EF_set_tempo x -> (0xf, x)
+                | EF_none -> failwith "none?!"
+        in
+        Printf.sprintf "%03x" ((fst bytes lsl 8) lor snd bytes)
+    in
+    let string_of_note_and_effect (note, effect) =
+        string_of_note note ^ " -- " ^ (string_of_effect effect)
+    in
+    String.concat "  " (List.map string_of_note_and_effect (Array.to_list row))
+in
+
+let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
+let warn str = prerr_string "modmod: warning: "; prerr_endline str in
+let warn_unless cond str = if not cond then warn str in
 
 (** [mix dest src] mixes the 16-bit little-endian audio buffer [src] into
     [dest]. *)
@@ -243,8 +288,8 @@ let play driver song =
             let pat_no = song.so_order.(order_no) in
             let pat = song.so_patterns.(pat_no) in
             let row = pat.(row_no) in
-            Printf.printf "%d:%d:" pat_no row_no;
-            Std.print row;
+            Printf.printf "%02d:%02d: %s" pat_no row_no (string_of_row row);
+            print_newline();
             update_tempo row;
             let pcm = render_row row in
             Ao.play driver pcm;
