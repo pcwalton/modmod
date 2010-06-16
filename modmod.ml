@@ -35,7 +35,6 @@ type effect =
     | EF_set_sample_offset of int               (* 9; offset *)
     | EF_volume_slide of (int * int)            (* A; upspeed, downspeed *)
     | EF_position_jump of int                   (* B; position *)
-    | EF_set_volume of int                      (* C; volume from 00-40 *)
     | EF_pattern_break                          (* D *)
     | EF_set_speed of int                       (* Fxx < 20; speed *)
     | EF_set_tempo of int                       (* Fxx >= 20; tempo *)
@@ -50,7 +49,13 @@ type note =
     | NO_note_on of note_on
 ;;
 
-type row = (note * effect) array;;  (* 4 notes *)
+type entry = {
+    en_note: note;
+    en_vol: int option;             (* 0x00-0x40 *)
+    en_effect: effect
+};;
+
+type row = entry array;;            (* 4 entries *)
 
 type pattern = row array;;          (* 64 rows *)
 
@@ -102,6 +107,9 @@ let string_of_row row =
                 in
                 period ^ " " ^ instr
     in
+    let string_of_vol vol =
+        Option.map_default (Printf.sprintf "%02x") "--" vol
+    in
     let string_of_effect effect =
         if effect = EF_none then "---" else
         let nibbles x y = (x lsl 4) lor y in
@@ -119,17 +127,19 @@ let string_of_row row =
                 | EF_set_sample_offset x -> (0x9, x)
                 | EF_volume_slide (x, y) -> (0xa, nibbles x y)
                 | EF_position_jump x -> (0xb, x)
-                | EF_set_volume x -> (0xc, x)
                 | EF_pattern_break -> (0xd, 0x00)
                 | EF_set_speed x | EF_set_tempo x -> (0xf, x)
                 | EF_none -> failwith "none?!"
         in
         Printf.sprintf "%03x" ((fst bytes lsl 8) lor snd bytes)
     in
-    let string_of_note_and_effect (note, effect) =
-        string_of_note note ^ " -- " ^ (string_of_effect effect)
+    let string_of_entry ent =
+        let note = string_of_note ent.en_note in
+        let vol = string_of_vol ent.en_vol in
+        let effect = string_of_effect ent.en_effect in
+        String.concat " " [ note; vol; effect ]
     in
-    String.concat "  " (List.map string_of_note_and_effect (Array.to_list row))
+    String.concat "  " (List.map string_of_entry (Array.to_list row))
 in
 
 let die str = prerr_string "modmod: "; prerr_endline str; exit 1 in
@@ -161,8 +171,8 @@ let play driver song =
     let channels = Array.init 4 (fun _ -> ref None) in
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) =
         let update_tempo row =
-            Array.iter begin fun (_, effect) ->
-                match effect with
+            Array.iter begin fun ent ->
+                match ent.en_effect with
                       EF_set_speed speed -> tempo.te_speed <- speed
                     | EF_set_tempo t -> tempo.te_tempo <- t
                     | _ -> ()
@@ -170,10 +180,10 @@ let play driver song =
         in
 
         let render_row row : string =
-            (* Play each note, updating the channels. *)
-            let play_note chan (note, effect) =
+            (* Play each entry, updating the channels. *)
+            let play_entry chan ent =
                 begin
-                    match note with
+                    match ent.en_note with
                           NO_none -> ()
                         | NO_note_on note_on ->
                             let render inst =
@@ -198,13 +208,13 @@ let play driver song =
                                 | (None, None) -> ()
                 end;
 
-                (* Handle middle-end effects. *)
-                match effect with
-                      EF_set_volume vol ->
-                        Option.may (fun audio -> audio.ca_vol <- vol) !chan
-                    | _ -> ()
+                (* Handle volume and middle-end effects. *)
+                let render_middle_effects audio =
+                    Option.may (fun vol -> audio.ca_vol <- vol) ent.en_vol
+                in
+                Option.may render_middle_effects !chan
             in
-            ExtArray.Array.iter2 play_note channels row;
+            ExtArray.Array.iter2 play_entry channels row;
 
             (* Create the buffers. TODO: reuse them. *)
             let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo*2) in
@@ -267,7 +277,7 @@ let play driver song =
                     else
                         play_row ~order:order_no ~row:(row_no + 1)
                 else
-                    match snd row.(i) with
+                    match row.(i).en_effect with
                           EF_pattern_break ->
                             play_row ~order:(order_no + 1) ~row:0
                         | EF_position_jump p ->
@@ -347,29 +357,33 @@ let load_mod(f:in_channel) : song =
     let patterns =
         let load_pattern _ =
             let load_row _ =
-                let load_note _ =
+                let load_entry _ =
                     let parse_effect cmd data =
                         let nibbles() = data lsr 4, data land 0xf in
-                        match cmd with
-                              0x0 when data == 0 -> EF_none
-                            | 0x0 -> EF_arpeggio(nibbles())
-                            | 0x1 -> EF_slide_up data
-                            | 0x2 -> EF_slide_down data
-                            | 0x3 -> EF_portamento data
-                            | 0x4 -> EF_vibrato(nibbles())
-                            | 0x5 -> EF_portamento_and_slide(nibbles())
-                            | 0x6 -> EF_vibrato_and_slide(nibbles())
-                            | 0x7 -> EF_tremolo(nibbles())
-                            | 0x9 -> EF_set_sample_offset data
-                            | 0xa -> EF_volume_slide(nibbles())
-                            | 0xb ->
-                                let (tens, ones) = nibbles() in
-                                EF_position_jump(tens * 10 + ones)  (* silly *)
-                            | 0xc -> EF_set_volume data
-                            | 0xd -> EF_pattern_break
-                            | 0xf when data <= 0x20 -> EF_set_speed data
-                            | 0xf -> EF_set_tempo data
-                            | _ -> EF_none      (* TODO: E-commands *)
+                        let vol = if cmd == 0xc then Some data else None in
+                        let effect =
+                            match cmd with
+                                  0x0 when data == 0 -> EF_none
+                                | 0x0 -> EF_arpeggio(nibbles())
+                                | 0x1 -> EF_slide_up data
+                                | 0x2 -> EF_slide_down data
+                                | 0x3 -> EF_portamento data
+                                | 0x4 -> EF_vibrato(nibbles())
+                                | 0x5 -> EF_portamento_and_slide(nibbles())
+                                | 0x6 -> EF_vibrato_and_slide(nibbles())
+                                | 0x7 -> EF_tremolo(nibbles())
+                                | 0x9 -> EF_set_sample_offset data
+                                | 0xa -> EF_volume_slide(nibbles())
+                                | 0xb ->
+                                    let (tens, ones) = nibbles() in
+                                    EF_position_jump(tens*10 + ones) (* o_O *)
+                                | 0xc -> EF_none    (* volume *)
+                                | 0xd -> EF_pattern_break
+                                | 0xf when data <= 0x20 -> EF_set_speed data
+                                | 0xf -> EF_set_tempo data
+                                | _ -> EF_none      (* TODO: E-commands *)
+                        in
+                        (vol, effect)
                     in
 
                     let a = IO.read_byte inf in
@@ -394,10 +408,10 @@ let load_mod(f:in_channel) : song =
                                 no_period = period
                             }
                     in
-                    let effect = parse_effect effect_cmd effect_data in
-                    (note, effect)
+                    let (vol, effect) = parse_effect effect_cmd effect_data in
+                    { en_note = note; en_vol = vol; en_effect = effect }
                 in
-                Array.init 4 load_note
+                Array.init 4 load_entry
             in
             Array.init 64 load_row
         in
