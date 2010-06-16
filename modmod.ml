@@ -450,7 +450,8 @@ let load_s3m f =
     let read_instr offset =
         seek_in f offset;
         let t = IO.read_byte inf in
-        let filename = IO.nread inf 12 in
+        assert (t == 1);    (* sample, not adlib melody or adlib drum *)
+        ignore(IO.nread inf 12);    (* filename *)
         let samp_offset =
             let lobyte = IO.read_byte inf in
             lobyte lor ((IO.read_ui16 inf) lsl 8)
@@ -467,11 +468,21 @@ let load_s3m f =
         warn_unless (flags land 0x02 == 0) "stereo samples TODO";
         warn_unless (flags land 0x04 == 0) "16-bit samples TODO";
 
-        let c2speed = IO.read_i32 inf in
+        let freq = IO.read_i32 inf in   (* frequency of C-2 *)
         ignore(IO.nread inf 12);
         let name = trim(IO.nread inf 28) in
         assert (IO.nread inf 28 == "SCRS");
-        failwith "TODO"
+
+        let data = IO.nread inf len in
+
+        let loop =
+            if not loop then None else
+            Some { li_start = loop_begin; li_len = loop_end - loop_begin }
+        in
+        let info =
+            { si_name = name; si_freq = freq; si_volume = vol; si_loop = loop }
+        in
+        { sa_data = data; sa_info = info }
     in
     let instrs = Array.map read_instr instr_offsets in
 
