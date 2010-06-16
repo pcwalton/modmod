@@ -11,7 +11,7 @@ type loop_info = {
 
 type sample_info = {
     si_name: string;            (* 22 characters long *)
-    si_finetune: int;
+    si_freq: int;               (* base frequency of C-2 *)
     si_volume: int;             (* 0x00-0x40 *)
     si_loop: loop_info option;
 };;
@@ -76,12 +76,7 @@ type channel_audio = {
 (* Constants *)
 
 let playback_freq = 44100 in
-let finetune_freqs = Array.map (( * ) 2) [|
-    (* table from mikmod/mplayer/mloader.c *)
-    8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
-    7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
-|] in
-let c1_period = 856/4 in
+let c2_period = 856/4 in
 
 let get_s16 buf idx =
     let value = Char.code buf.[idx] lor ((Char.code buf.[idx + 1]) lsl 8) in
@@ -184,9 +179,8 @@ let play driver song =
                             let render inst =
                                 let period = note_on.no_period in
                                 let info = song.so_samples.(inst).sa_info in
-                                let finetune = info.si_finetune in
-                                let c1_freq = finetune_freqs.(finetune) in
-                                let freq = c1_period * c1_freq / period in
+                                let c2_freq = info.si_freq in
+                                let freq = c2_period * c2_freq / period in
                                 chan := Some {
                                     ca_sample = inst;
                                     ca_freq = freq;
@@ -301,6 +295,11 @@ in
 let trim = ExtString.String.strip ~chars:"\000" in
 
 let load_mod(f:in_channel) : song =
+    let finetune_freqs = Array.map (( * ) 2) [|
+        (* table from mikmod/mplayer/mloader.c *)
+        8363; 8413; 8463; 8529; 8581; 8651; 8723; 8757;
+        7895; 7941; 7985; 8046; 8107; 8169; 8232; 8280
+    |] in
     let valid_ids = ExtHashtbl.Hashtbl.of_enum (ExtList.List.enum [
         ("M.K.", ()); ("4CHN", ()); ("FLT4", ());
     ]) in
@@ -316,12 +315,13 @@ let load_mod(f:in_channel) : song =
             let name = trim (IO.nread inf 22) in
             let len = read_word_and_double() in
             let finetune = (IO.read_byte inf) land 0x0f in
+            let freq = finetune_freqs.(finetune) in
             let volume = IO.read_byte inf in
             let loop_start = read_word_and_double() in
             let loop_len = read_word_and_double() in
             let info = {
                 si_name = name;
-                si_finetune = finetune;
+                si_freq = freq;
                 si_volume = volume;
                 si_loop =
                     if loop_len == 0 then None else
