@@ -59,9 +59,17 @@ type row = entry array;;            (* 4 entries *)
 
 type pattern = row array;;          (* 64 rows *)
 
+type panning =
+      PA_left
+    | PA_right
+;;
+
+type channel = panning option;;
+
 type song = {
-    so_title: string;               (* 20 characters long *)
-    so_samples: sample array;       (* 31 samples long *)
+    so_title: string;                   (* 20 characters long *)
+    so_samples: sample array;           (* 31 samples long *)
+    so_channels: channel array;         (* up to 32 channels *)
     so_order: int array;
     so_patterns: pattern array
 };;
@@ -71,11 +79,11 @@ type tempo = {
     mutable te_speed: int;          (* rows per beat (default 6) *)
 };;
 
-type channel_audio = {
-    ca_sample: int;
-    ca_freq: int;
-    mutable ca_vol: int;
-    mutable ca_pos: int
+type channel_state = {
+    cs_sample: int;
+    cs_freq: int;
+    mutable cs_vol: int;
+    mutable cs_pos: int
 };;
 
 (* Constants *)
@@ -168,7 +176,8 @@ in
 
 let play driver song =
     let tempo = { te_tempo = 125; te_speed = 6 } in
-    let channels = Array.init 4 (fun _ -> ref None) in
+    let chan_state = Array.init 4 (fun _ -> ref None) in
+    let channels = song.so_channels in
     let rec play_row ~order:(order_no:int) ~row:(row_no:int) =
         let update_tempo row =
             Array.iter begin fun ent ->
@@ -180,8 +189,8 @@ let play driver song =
         in
 
         let render_row row : string =
-            (* Play each entry, updating the channels. *)
-            let play_entry chan ent =
+            (* Play each entry, updating the channel state. *)
+            let play_entry chan_state ent =
                 begin
                     match ent.en_note with
                           NO_none -> ()
@@ -191,54 +200,54 @@ let play driver song =
                                 let info = song.so_samples.(inst).sa_info in
                                 let c2_freq = info.si_freq in
                                 let freq = c2_period * c2_freq / period in
-                                chan := Some {
-                                    ca_sample = inst;
-                                    ca_freq = freq;
-                                    ca_vol = info.si_volume;
-                                    ca_pos = 0
+                                chan_state := Some {
+                                    cs_sample = inst;
+                                    cs_freq = freq;
+                                    cs_vol = info.si_volume;
+                                    cs_pos = 0
                                 }
                             in
 
-                            match (note_on.no_instrument, !chan) with
+                            match (note_on.no_instrument, !chan_state) with
                                   (* change the instrument *)
                                   (Some inst, _) -> render inst
                                   (* keep the old channel instrument *)
-                                | (None, Some audio) -> render audio.ca_sample
+                                | (None, Some state) -> render state.cs_sample
                                   (* ignore *)
                                 | (None, None) -> ()
                 end;
 
                 (* Handle volume and middle-end effects. *)
-                let render_middle_effects audio =
-                    Option.may (fun vol -> audio.ca_vol <- vol) ent.en_vol
+                let render_middle_effects state =
+                    Option.may (fun vol -> state.cs_vol <- vol) ent.en_vol
                 in
-                Option.may render_middle_effects !chan
+                Option.may render_middle_effects !chan_state
             in
-            ExtArray.Array.iter2 play_entry channels row;
+            ExtArray.Array.iter2 play_entry chan_state row;
 
             (* Create the buffers. TODO: reuse them. *)
             let len = playback_freq*tempo.te_speed*5 / (tempo.te_tempo*2) in
             let dest = String.make (len*4) '\000' in
             let buf = String.create (len*4) in
 
-            (* Render each channel. *)
-            let render_channel chan =
+            (* Render the audio on each channel. *)
+            let render_channel chan_state panning =
                 String.fill buf 0 (len*4) '\000';
                 for i = 0 to len - 1 do
-                    Option.may begin fun audio ->
-                        let sample = song.so_samples.(audio.ca_sample) in
+                    Option.may begin fun state ->
+                        let sample = song.so_samples.(state.cs_sample) in
                         let { sa_info = info; sa_data = data } = sample in
                         let len = String.length data in
                         let pos =
                             Int64.to_int
                                 (Int64.div
-                                    (Int64.mul (Int64.of_int audio.ca_pos)
-                                        (Int64.of_int audio.ca_freq))
+                                    (Int64.mul (Int64.of_int state.cs_pos)
+                                        (Int64.of_int state.cs_freq))
                                     (Int64.of_int playback_freq))
                         in
                         let past_end = pos >= len in
                         if past_end && Option.is_none info.si_loop then
-                            chan := None    (* past the end *)
+                            chan_state := None  (* past the end *)
                         else begin
                             let pos =
                                 if not past_end then pos else
@@ -253,16 +262,21 @@ let play driver song =
                             let samp = Char.code data.[pos] in
                             let samp = if samp < 128 then samp else samp-256 in
                             let samp = samp lsl 8 in
-                            let samp = samp * audio.ca_vol / 0x40 / 2 in
-                            set_s16 buf (i*4) samp;
-                            set_s16 buf (i*4 + 2) samp;
-                            audio.ca_pos <- audio.ca_pos + 1
+                            let samp = samp * state.cs_vol / 0x40 / 2 in
+                            begin
+                                match panning with
+                                      PA_left -> set_s16 buf (i*4) samp
+                                    | PA_right -> set_s16 buf (i*4 + 2) samp
+                            end;
+                            state.cs_pos <- state.cs_pos + 1
                         end
-                    end !chan
+                    end !chan_state
                 done;
                 mix dest buf;
             in
-            Array.iter render_channel channels;
+            ExtArray.Array.iter2 begin fun chan_state chan_info ->
+                Option.may (render_channel chan_state) chan_info
+            end chan_state channels;
             dest
         in
 
@@ -427,9 +441,14 @@ let load_mod(f:in_channel) : song =
         Array.map load_sample_data sample_infos
     in
 
+    let channels =
+        [| Some PA_left; Some PA_left; Some PA_right; Some PA_right |]
+    in
+
     {
         so_title = title;
         so_samples = samples;
+        so_channels = channels;
         so_order = order;
         so_patterns = patterns
     }
