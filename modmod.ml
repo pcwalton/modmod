@@ -21,23 +21,71 @@ type sample = {
     sa_data: string
 };;
 
+type volume_slide =
+    | VS_down of int                            (* 40y; downspeed *)
+    | VS_up of int                              (* 4x0; upspeed *)
+;;
+
+type retrig_factor =
+    | RE_const of int                           (* add a constant *)
+    | RE_two_thirds_x                           (* 2/3 times the volume *)
+    | RE_one_half_x                             (* 1/2 the volume *)
+    | RE_three_halves_x                         (* 3/2 the volume *)
+    | RE_two_x                                  (* twice the volume *)
+;;
+
+type waveform =
+    | WA_sine                                   (* 0 *)
+    | WA_ramp_down                              (* 1 *)
+    | WA_square                                 (* 2 *)
+    | WA_random                                 (* 3 *)
+;;
+    
+type panning =
+    | PA_left
+    | PA_right
+;;
+
 type effect =
-      EF_none
-    | EF_arpeggio of (int * int)                (* 0; 1st half note add, 2nd *)
-    | EF_slide_up of int                        (* 1; upspeed *)
-    | EF_slide_down of int                      (* 2; downspeed *)
-    | EF_portamento of int                      (* 3; up/downspeed *)
-    | EF_vibrato of (int * int)                 (* 4; speed, depth *)
-    | EF_portamento_and_slide of (int * int)    (* 5; upspeed, downspeed *)
-    | EF_vibrato_and_slide of (int * int)       (* 6; upspeed, downspeed *)
-    | EF_tremolo of (int * int)                 (* 7; speed, depth *)
-    | EF_pan of (int * int)                     (* 8; ??? *)
-    | EF_set_sample_offset of int               (* 9; offset *)
-    | EF_volume_slide of (int * int)            (* A; upspeed, downspeed *)
-    | EF_position_jump of int                   (* B; position *)
-    | EF_pattern_break                          (* D *)
-    | EF_set_speed of int                       (* Fxx < 20; speed *)
-    | EF_set_tempo of int                       (* Fxx >= 20; tempo *)
+    | EF_none
+    | EF_set_speed of int                       (* 1xx; speed *)
+    | EF_order_jump of int                      (* 2xx; order *)
+    | EF_pattern_break of int                   (* 3xy; pattern break *)
+    | EF_volume_slide of volume_slide           (* 4xy *)
+    | EF_fine_volume_down of int                (* 4Fy; downspeed *)
+    | EF_fine_volume_up of int                  (* 4xF; upspeed *)
+    | EF_slide_down of int                      (* 5xx; downspeed *)
+    | EF_fine_slide_down of int                 (* 5Fy; downspeed *)
+    | EF_extra_fine_slide_down of int           (* 5Ey; downspeed *)
+    | EF_slide_up of int                        (* 6xx; upspeed *)
+    | EF_fine_slide_up of int                   (* 6Fy; downspeed *)
+    | EF_extra_fine_slide_up of int             (* 6Ey; upspeed *)
+    | EF_portamento of int                      (* 7xx; up/downspeed *)
+    | EF_vibrato of (int * int)                 (* 8xy; speed, depth *)
+    | EF_tremor of (int * int)                  (* 9xy: ontime,offtime *)
+    | EF_arpeggio of (int * int)                (* Axy; 1st 1/2note add, 2nd *)
+    | EF_vibrato_and_volume_slide of volume_slide
+                                                (* Bxy *)
+    | EF_portamento_and_volume_slide of volume_slide
+                                                (* Cxy *)
+    | EF_set_sample_offset of int               (* Fxx; offset *)
+    | EF_retrig of (retrig_factor * int)        (* 11xy; factor, frame delay *)
+    | EF_tremolo of (int * int)                 (* 12xy; speed, depth *)
+    | EF_set_glissando_control of bool          (* 131x; on *)
+    | EF_set_finetune of int                    (* 132x; c4speed *)
+    | EF_set_vibrato_waveform of waveform       (* 133x; waveform *)
+    | EF_set_tremolo_waveform of waveform       (* 134x; waveform *)
+    | EF_set_pan of panning                     (* 138x; pan position *)
+    | EF_pattern_loop_start                     (* 13B0 *)
+    | EF_pattern_loop of int                    (* 13Bx; count *)
+    | EF_note_cut of int                        (* 13Cx; frame count *)
+    | EF_note_delay of int                      (* 13Dx; frame count *)
+    | EF_pattern_delay of int                   (* 13Ex; note count *)
+    | EF_funk_repeat of int                     (* 13Fx; funk repeat *)
+    | EF_set_tempo of int                       (* 14Fx; tempo *)
+    | EF_fine_vibrato of (int * int)            (* 15xx; speed, depth *)
+    | EF_set_global_volume of int               (* 16xx; volume *)
+;;
 
 type note_on = {
     no_instrument: int option;
@@ -58,11 +106,6 @@ type entry = {
 type row = entry array;;            (* 4 entries *)
 
 type pattern = row array;;          (* 64 rows *)
-
-type panning =
-      PA_left
-    | PA_right
-;;
 
 type channel = {
     ch_panning: panning
@@ -125,21 +168,21 @@ let string_of_row row =
         let nibbles x y = (x lsl 4) lor y in
         let bytes =
             match effect with
-                  EF_arpeggio(x, y) -> (0x0, nibbles x y)
+                | EF_arpeggio(x, y) -> (0x0, nibbles x y)
                 | EF_slide_up x -> (0x1, x)
                 | EF_slide_down x -> (0x2, x)
                 | EF_portamento x -> (0x3, x)
                 | EF_vibrato(x, y) -> (0x4, nibbles x y)
-                | EF_portamento_and_slide(x, y) -> (0x5, nibbles x y)
-                | EF_vibrato_and_slide(x, y) -> (0x6, nibbles x y)
+                (* | EF_portamento_and_slide(x, y) -> (0x5, nibbles x y)
+                | EF_vibrato_and_slide(x, y) -> (0x6, nibbles x y) *)
                 | EF_tremolo(x, y) -> (0x7, nibbles x y)
-                | EF_pan(x, y) -> (0x8, nibbles x y)
+                (* | EF_pan(x, y) -> (0x8, nibbles x y) *)
                 | EF_set_sample_offset x -> (0x9, x)
-                | EF_volume_slide (x, y) -> (0xa, nibbles x y)
-                | EF_position_jump x -> (0xb, x)
-                | EF_pattern_break -> (0xd, 0x00)
+                (* | EF_volume_slide (x, y) -> (0xa, nibbles x y) *)
+                | EF_order_jump x -> (0xb, x)
+                | EF_pattern_break x -> (0xd, x)
                 | EF_set_speed x | EF_set_tempo x -> (0xf, x)
-                | EF_none -> failwith "none?!"
+                | _ -> (0xf, 0xff)  (* TODO *)
         in
         Printf.sprintf "%03x" ((fst bytes lsl 8) lor snd bytes)
     in
@@ -174,6 +217,12 @@ let mix dest src =
         else ()
     in
     loop 0
+in
+
+let parse_volume_slide x y =
+    if x == 0 then VS_down y
+    else if y == 0 then VS_up x
+    else failwith "volume slide expected"
 in
 
 let play driver song =
@@ -294,9 +343,9 @@ let play driver song =
                         play_row ~order:order_no ~row:(row_no + 1)
                 else
                     match row.(i).en_effect with
-                          EF_pattern_break ->
-                            play_row ~order:(order_no + 1) ~row:0
-                        | EF_position_jump p ->
+                          EF_pattern_break r ->
+                            play_row ~order:(order_no + 1) ~row:r
+                        | EF_order_jump p ->
                             play_row ~order:p ~row:0
                         | _ ->
                             check_note_and_jump (i + 1)
@@ -374,29 +423,34 @@ let load_mod(f:in_channel) : song =
         let load_pattern _ =
             let load_row _ =
                 let load_entry _ =
-                    let parse_effect cmd data =
-                        let nibbles() = data lsr 4, data land 0xf in
-                        let vol = if cmd == 0xc then Some data else None in
+                    let parse_effect cmd xx =
+                        let x, y = xx lsr 4, xx land 0xf in
+                        let vol = if cmd == 0xc then Some xx else None in
                         let effect =
                             match cmd with
-                                  0x0 when data == 0 -> EF_none
-                                | 0x0 -> EF_arpeggio(nibbles())
-                                | 0x1 -> EF_slide_up data
-                                | 0x2 -> EF_slide_down data
-                                | 0x3 -> EF_portamento data
-                                | 0x4 -> EF_vibrato(nibbles())
-                                | 0x5 -> EF_portamento_and_slide(nibbles())
-                                | 0x6 -> EF_vibrato_and_slide(nibbles())
-                                | 0x7 -> EF_tremolo(nibbles())
-                                | 0x9 -> EF_set_sample_offset data
-                                | 0xa -> EF_volume_slide(nibbles())
+                                  0x0 when xx == 0x00 -> EF_none
+                                | 0x0 -> EF_arpeggio(x, y)
+                                | 0x1 -> EF_slide_up xx
+                                | 0x2 -> EF_slide_down xx
+                                | 0x3 -> EF_portamento xx
+                                | 0x4 -> EF_vibrato(x, y)
+                                | 0x5 ->
+                                    let slide = parse_volume_slide x y in
+                                    EF_portamento_and_volume_slide(slide)
+                                | 0x6 ->
+                                    let slide = parse_volume_slide x y in
+                                    EF_vibrato_and_volume_slide(slide)
+                                | 0x7 -> EF_tremolo(x, y)
+                                | 0x9 -> EF_set_sample_offset xx
+                                | 0xa ->
+                                    let slide = parse_volume_slide x y in
+                                    EF_volume_slide(slide)
                                 | 0xb ->
-                                    let (tens, ones) = nibbles() in
-                                    EF_position_jump(tens*10 + ones) (* o_O *)
+                                    EF_order_jump(x*10 + y) (* decimal o_O *)
                                 | 0xc -> EF_none    (* volume *)
-                                | 0xd -> EF_pattern_break
-                                | 0xf when data <= 0x20 -> EF_set_speed data
-                                | 0xf -> EF_set_tempo data
+                                | 0xd -> EF_pattern_break 0
+                                | 0xf when xx <= 0x20 -> EF_set_speed xx
+                                | 0xf -> EF_set_tempo xx
                                 | _ -> EF_none      (* TODO: E-commands *)
                         in
                         (vol, effect)
@@ -477,12 +531,23 @@ let load_s3m f =
     let (master_volume, output_channels) =
         let b = IO.read_byte inf in (b land 0x7f, b lsr 7)
     in
+
+    let load_channel _ =
+        let b = IO.read_byte inf in
+        if b land 0x80 == 0 then None
+        else if b land 0x07 != 0 then Some { ch_panning = PA_left }
+        else if b land 0x38 != 0 then Some { ch_panning = PA_right }
+        else None
+    in
     seek_in f 0x40;
+    let channels = Array.init 32 load_channel in
+
+    seek_in f 0x60;
     let order = Array.init order_count (fun _ -> IO.read_byte inf) in
     let instr_offsets = Array.init instr_count read_parapointer in
     let pat_offsets = Array.init pat_count read_parapointer in
 
-    let read_instr offset =
+    let load_instr offset =
         seek_in f offset;
         let t = IO.read_byte inf in
         assert (t == 1);    (* sample, not adlib melody or adlib drum *)
@@ -519,13 +584,118 @@ let load_s3m f =
         in
         { sa_data = data; sa_info = info }
     in
-    let instrs = Array.map read_instr instr_offsets in
+    let instrs = Array.map load_instr instr_offsets in
 
-    let read_pat offset =
-        seek_in f offset;
-        failwith "TODO"
+    let load_effect() =
+        let cmd = IO.read_byte inf in
+        let xx = IO.read_byte inf in
+        let x, y = xx lsr 4, xx land 0xf in
+
+        let retrig_factor() =
+            match x with
+            | 0x1 | 0x2 | 0x3 | 0x4 | 0x5 -> RE_const(-(1 lsl (x - 0x1)))
+            | 0x6 -> RE_two_thirds_x
+            | 0x7 -> RE_one_half_x
+            | 0x9 | 0xa | 0xb | 0xc | 0xd -> RE_const(1 lsl (x - 0x9))
+            | 0xe -> RE_three_halves_x
+            | 0xf -> RE_two_x
+            | _ -> RE_const 0 
+        in
+        let waveform() =
+            match y with
+            | 0 -> WA_sine
+            | 1 -> WA_ramp_down
+            | 2 -> WA_square
+            | _ -> WA_random
+        in
+
+        let dec = x * 10 + y in
+        match cmd with
+        | 0x1 -> EF_set_speed xx
+        | 0x2 -> EF_order_jump xx
+        | 0x3 -> EF_pattern_break dec
+        | 0x4 when y == 0xf -> EF_fine_volume_up x
+        | 0x4 when x == 0xf -> EF_fine_volume_down y
+        | 0x4 -> EF_volume_slide (parse_volume_slide x y)
+        | 0x5 when x == 0xf -> EF_fine_slide_down y
+        | 0x5 when x == 0xe -> EF_extra_fine_slide_down y
+        | 0x5 -> EF_slide_down xx
+        | 0x6 when x == 0xf -> EF_fine_slide_up y
+        | 0x6 when x == 0xe -> EF_extra_fine_slide_up y
+        | 0x6 -> EF_slide_up xx
+        | 0x7 -> EF_portamento xx
+        | 0x8 -> EF_vibrato(x, y)
+        | 0x9 -> EF_tremor(x, y)
+        | 0xa -> EF_arpeggio(x, y)
+        | 0xb -> EF_vibrato_and_volume_slide(parse_volume_slide x y)
+        | 0xc -> EF_portamento_and_volume_slide(parse_volume_slide x y)
+        | 0xf -> EF_set_sample_offset xx
+        | 0x11 -> EF_retrig(retrig_factor(), y)
+        | 0x12 -> EF_tremolo(x, y)
+        | 0x13 when x == 0x1 -> EF_set_glissando_control (y!=0)
+        | 0x13 when x == 0x2 -> EF_set_finetune y
+        | 0x13 when x == 0x3 -> EF_set_vibrato_waveform(waveform())
+        | 0x13 when x == 0x4 -> EF_set_tremolo_waveform(waveform())
+        | 0x13 when xx == 0x80 -> EF_set_pan PA_left
+        | 0x13 when xx == 0x8f -> EF_set_pan PA_right
+        | 0x13 when xx == 0xb0 -> EF_pattern_loop_start
+        | 0x13 when x == 0xb -> EF_pattern_loop y
+        | 0x13 when x == 0xc -> EF_note_cut y
+        | 0x13 when x == 0xd -> EF_note_delay y
+        | 0x13 when x == 0xe -> EF_pattern_delay y
+        | 0x13 when x == 0xf -> EF_funk_repeat y
+        | 0x14 -> EF_set_tempo x
+        | 0x15 -> EF_fine_vibrato(x, y)
+        | 0x16 -> EF_set_global_volume x
+        | _ -> EF_none
     in
-    let pats = Array.map read_pat pat_offsets in
+
+    let load_pat offset =
+        let load_row _ =
+            let row = Array.make 32 {
+                en_note = NO_none;
+                en_vol = None;
+                en_effect = EF_none
+            } in
+
+            let rec load_entry() =
+                let a = IO.read_byte inf in
+                if a == 0 then () else begin
+                    let chan = a land 31 in
+                    let note =
+                        if a land 32 == 0 then NO_none else begin
+                            let pd = IO.read_byte inf in
+                            let instr = IO.read_byte inf in
+                            NO_note_on {
+                                no_instrument = Some instr;
+                                no_period = pd
+                            }
+                        end
+                    in
+                    let vol =
+                        if a land 64 == 0 then None else
+                        Some (IO.read_byte inf)
+                    in
+                    let effect =
+                        if a land 128 == 0 then EF_none else load_effect()
+                    in
+
+                    let entry =
+                        { en_note = note; en_vol = vol; en_effect = effect }
+                    in
+                    row.(chan) <- entry;
+                    load_entry()
+                end
+            in
+            load_entry();
+            row
+        in
+
+        seek_in f offset;
+        let _ = IO.read_ui16 inf in     (* skip length *)
+        Array.init 64 load_row
+    in
+    let pats = Array.map load_pat pat_offsets in
 
     failwith "TODO"
 in
