@@ -64,12 +64,14 @@ type panning =
     | PA_right
 ;;
 
-type channel = panning option;;
+type channel = {
+    ch_panning: panning
+};;
 
 type song = {
     so_title: string;                   (* 20 characters long *)
     so_samples: sample array;           (* 31 samples long *)
-    so_channels: channel array;         (* up to 32 channels *)
+    so_channels: channel option array;  (* up to 32 channels *)
     so_order: int array;
     so_patterns: pattern array
 };;
@@ -231,7 +233,7 @@ let play driver song =
             let buf = String.create (len*4) in
 
             (* Render the audio on each channel. *)
-            let render_channel chan_state panning =
+            let render_channel chan_state chan =
                 String.fill buf 0 (len*4) '\000';
                 for i = 0 to len - 1 do
                     Option.may begin fun state ->
@@ -264,7 +266,7 @@ let play driver song =
                             let samp = samp lsl 8 in
                             let samp = samp * state.cs_vol / 0x40 / 2 in
                             begin
-                                match panning with
+                                match chan.ch_panning with
                                       PA_left -> set_s16 buf (i*4) samp
                                     | PA_right -> set_s16 buf (i*4 + 2) samp
                             end;
@@ -274,8 +276,8 @@ let play driver song =
                 done;
                 mix dest buf;
             in
-            ExtArray.Array.iter2 begin fun chan_state chan_info ->
-                Option.may (render_channel chan_state) chan_info
+            ExtArray.Array.iter2 begin fun chan_state chan ->
+                Option.may (render_channel chan_state) chan
             end chan_state channels;
             dest
         in
@@ -441,9 +443,9 @@ let load_mod(f:in_channel) : song =
         Array.map load_sample_data sample_infos
     in
 
-    let channels =
-        [| Some PA_left; Some PA_left; Some PA_right; Some PA_right |]
-    in
+    let left = Some { ch_panning = PA_left } in
+    let right = Some { ch_panning = PA_right } in
+    let channels = [| left; left; right; right |] in
 
     {
         so_title = title;
