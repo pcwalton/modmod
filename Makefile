@@ -1,4 +1,4 @@
-OCAMLMAKEFILE=/usr/share/ocamlmakefile/OCamlMakefile
+OCAMLMAKEFILE:=/usr/share/ocamlmakefile/OCamlMakefile
 
 SOURCES=modmod.ml
 PACKS=ao extlib

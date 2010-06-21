@@ -499,7 +499,7 @@ let load_mod(f:in_channel) : song =
 
     let left = Some { ch_panning = PA_left } in
     let right = Some { ch_panning = PA_right } in
-    let channels = [| left; left; right; right |] in
+    let channels = [| left; right; left; right |] in
 
     {
         so_title = title;
